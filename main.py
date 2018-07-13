@@ -1,13 +1,14 @@
 #!/usr/bin/env python
 # _*_ coding: utf-8 _*_
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackQueryHandler
+from telegram.ext import (Updater, CommandHandler, MessageHandler, Filters, CallbackQueryHandler)
 from functools import wraps
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-import logging, configparser, sqlite3, re, datetime, signal, os
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ChatAction
+import logging, configparser, sqlite3, re, datetime, signal, os, io
 
 # logging initialize
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # config initializing
 config = configparser.ConfigParser()
@@ -114,13 +115,16 @@ def user_records(chat_id: str) -> list:
     return cursor.fetchone()[0]
 
 
-def wage_calc(chat_id: str, dates: dict) -> list:
+def wage_calc(chat_id: str, start_date, end_date) -> list:
     cursor.execute("SELECT SUM(amount) FROM data WHERE chat_id=:id \
-                      AND date_time BETWEEN ':sy-:sm-:sd' and ':ey-:em-:ed'",
-                      {'id': chat_id, 'sy': dates['sy'], 'sm': dates['sm'],
-                       'sd': dates['sd'], 'ey': dates['ey'], 'em': dates['sy'],
-                       'ed': dates['ed']})
-    return cursor.fetchone()
+                    AND date_time BETWEEN :sd and :ed",
+                  {'id': chat_id, 'sd': start_date, 'ed': end_date})
+    return cursor.fetchone()[0]
+
+
+def purge_all():
+    with db:
+        cursor.execute("DELETE FROM data")
 
 
 # Bot handlers
@@ -132,7 +136,7 @@ def restricted(func):
         user_id = update.effective_user.id
         if user_id not in admin_list:
             bot.send_message(chat_id=update.message.chat_id,
-                         text="You don't have access to this command.")
+                             text="You don't have access to this command.")
             return
         return func(bot, update, *args, **kwargs)
     return wrapped
@@ -150,13 +154,13 @@ def sms(bot, update):
     Also shows accumulative wage in a month that SMS was from
     """
     try:
-        sms = parse_sms(update.message.text)
+        sms_p = parse_sms(update.message.text)
     except AttributeError:
         bot.send_message(chat_id=update.message.chat_id,
                          text='Unable to parse. Please, send valid SMS!')
         return None
 
-    # EXPERIMANTAL MENU PART
+    # EXPERIMENTAL MENU PART
 
 #   if new_card(update.message.chat_id, sms['card']):
 #       bot.send_message(chat_id=update.message.chat_id,
@@ -171,38 +175,76 @@ def sms(bot, update):
 
     # ENF OF MENU
 
-
-    insert_transaction(update.message.chat_id, update.message.from_user['username'], sms)
+    insert_transaction(update.message.chat_id, update.message.from_user['username'], sms_p)
     bot.send_message(chat_id=update.message.chat_id,
                      text='Transaction added successfully!')
 
     if sms['datetime'].date() == datetime.datetime.now().date():
         now = datetime.datetime.now()
         month = now.month if now.day > separator_date else now.month - 1
-        dates = {'sy': now.year, 'sm': month-1, 'sd': separator_date, 'ey': now.year,
-                 'em': month, 'ed': separator_date}
-        wage = wage_calc(update.message.chat_id, dates)
+        start_date = datetime.datetime(now.year, month-1, separator_date)
+        end_date = datetime.datetime(now.year, month, separator_date)
+        wage = wage_calc(update.message.chat_id, start_date, end_date)
         bot.send_message(chat_id=update.message.chat_id,
                          text="Your last month's wage is {} so far".format(wage))
     else:
         now = sms['datetime']
         month = now.month if now.day > separator_date else now.month - 1
-        dates = {'sy': now.year, 'sm': month-1, 'sd': separator_date, 'ey': now.year,
-                 'em': month, 'ed': separator_date}
-        wage = wage_calc(update.message.chat_id, dates)
+        start_date = datetime.datetime(now.year, month-1, separator_date)
+        end_date = datetime.datetime(now.year, month, separator_date)
+        wage = wage_calc(update.message.chat_id, start_date, end_date)
         bot.send_message(chat_id=update.message.chat_id,
                          text="Your wage in that month is {} so far".format(wage))
 
 
+def csv_parse(bot, update):
+    if update.message.document.file_name[-4:] != '.csv':
+        bot.send_message(chat_id=update.message.chat_id,
+                         text="Only CSV is allowed!")
+        return None
+    else:
+        bot.send_message(chat_id=update.message.chat_id,
+                         text="CSV file found, commencing download")
+
+    # downloading CSV file into memory as a StringIO
+    csvf = bot.getFile(update.message.document.file_id)
+    csv_file_bin = io.BytesIO()
+    csvf.download(out=csv_file_bin)
+    csv_file_bin.seek(0)
+
+    bot.send_message(chat_id=update.message.chat_id,
+                     text="Download complete, commencing parsing")
+    bot.send_chat_action(chat_id=update.message.chat_id,
+                         action=ChatAction.TYPING)
+
+    i,j = 0, 0
+    for line in csv_file_bin:
+        try:
+            parsed = parse_sms(line.decode('UTF-8').split(',')[-1])
+            insert_transaction(update.message.chat_id,
+                               update.message.from_user['username'], parsed)
+            i += 1
+            j += 1
+        except AttributeError:
+            j += 1
+    bot.send_message(chat_id=update.message.chat_id,
+                     text="{} lines total, {} of them were parsed and added.".format(j, i))
+
+
 @restricted
-def all_data(bot, update):
-    bot.send_message(chat_id=update.message.chat_id, text=str(table_data()))
+def purge_db(bot, update):
+    keyboard = [[InlineKeyboardButton("Yes, drop it!", callback_data="DROP")],
+                [InlineKeyboardButton("No, wait!", callback_data="0")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    update.message.reply_text("Are you sure you want to purge an entire database?",
+                              reply_markup=reply_markup)
 
 
 @restricted
 def dump_db(bot, update):
     bot.send_document(chat_id=update.message.chat_id,
-                          document=open(db_path, 'rb'))
+                      document=open(db_path, 'rb'))
 
 
 def user_data(bot, update):
@@ -211,68 +253,85 @@ def user_data(bot, update):
 
 
 def wage_request(bot, update, args):
-    ''' takes arguments, tries to parse them and return wage for the mentioned
+    """ takes arguments, tries to parse them and return wage for the mentioned
     period
-    for now: 06 2017'''
+    for now: 06 2017"""
     if len(args) == 0:
         now = datetime.datetime.now()
         month = now.month if now.day > separator_date else now.month - 1
-        dates = {'sy': now.year, 'sm': month-1, 'sd': separator_date, 'ey': now.year,
-                 'em': month, 'ed': separator_date}
+        start_date = datetime.datetime(now.year, month-1, separator_date)
+        end_date = datetime.datetime(now.year, month, separator_date)
     elif len(args) == 1:
         if len(args[0]) > 2:
-            #enitire year
+            # entire year
             pass
         else:
             month = args[0]
             year = datetime.datetime.now().year
             month = now.month if now.day > separator_date else now.month - 1
-            dates = {'sy': year, 'sm': month-1, 'sd': separator_date,
-                     'ey': year, 'em': month, 'ed': separator_date}
+            start_date = datetime.datetime(year, month-1, separator_date)
+            end_date = datetime.datetime(year, month, separator_date)
     else:
         month = args[0]
         year = args[1]
-        dates = {'sy': year, 'sm': month-1, 'sd': separator_date, 'ey': year,
-                 'em': month, 'ed': separator_date}
+        start_date = datetime.datetime(year, month-1, separator_date)
+        end_date = datetime.datetime(year, month, separator_date)
 
-    wage = wage_calc(update.message.chat_id, dates)
+    wage = wage_calc(update.message.chat_id, start_date, end_date)
     bot.send_message(chat_id=update.message.chat_id,
                      text="Your wage in that period was {}".format(wage))
 
 
 def user_info(bot, update):
     bot.send_message(chat_id=update.message.chat_id,
-                 text="Your chat_id is {}, we have {} records concerning you".\
+                 text="Your chat_id is {}, we have {} records concerning you".
                  format(update.message.chat_id, user_records(update.message.chat_id)))
+
+
+def button(bot, update):
+    query = update.callback_query
+
+    if query.data == "DROP":
+    #   bot.send_message(chat_id=update.message.chat_id,
+    #                    text="Well, you asked for it, PURGING DB")
+        purge_all()
 
 
 def unknown(bot, update):
     bot.send_message(chat_id=updater.message.chat_id,
                      text="Unknown command.")
 
+
+def error(bot, update, error):
+    """Log Errors caused by Updates."""
+    logger.warning('Update "%s" caused error "%s"', update, error)
+
 # MAIN LOOP HERE
 
 
 def main():
     start_handler = CommandHandler('start', start)
-    alldata_handler = CommandHandler('alldata', all_data)
     userdata_handler = CommandHandler('userdata', user_data)
     dumpdb_handler = CommandHandler('dumpdb', dump_db)
     userinfo_handler = CommandHandler('userinfo', user_info)
+    purgedb_handler = CommandHandler('purgedb', purge_db)
     wagerequest_handler = CommandHandler('wage', wage_request, pass_args=True)
     sms_handler = MessageHandler(Filters.text, sms)
-#   newcardmenu_handler = CallbackQueryHandler(newcardmenu))
+    csv_handler = MessageHandler(Filters.document, csv_parse)
+    button_handler = CallbackQueryHandler(button)
     unknown_handler = MessageHandler(Filters.command, unknown)
 
     dispatcher.add_handler(start_handler)
-    dispatcher.add_handler(alldata_handler)
     dispatcher.add_handler(userdata_handler)
     dispatcher.add_handler(dumpdb_handler)
     dispatcher.add_handler(userinfo_handler)
+    dispatcher.add_handler(purgedb_handler)
     dispatcher.add_handler(sms_handler)
+    dispatcher.add_handler(csv_handler)
     dispatcher.add_handler(wagerequest_handler)
-#   dispatcher.add_handler(newcardmenu_handler)
-    #unknown handler should go last!
+    dispatcher.add_handler(button_handler)
+    dispatcher.add_error_handler(error)
+    # unknown handler should go last!
     dispatcher.add_handler(unknown_handler)
 
     updater.start_polling()
