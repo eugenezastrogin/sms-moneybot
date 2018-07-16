@@ -1,9 +1,17 @@
 #!/usr/bin/env python
 # _*_ coding: utf-8 _*_
-from telegram.ext import (Updater, CommandHandler, MessageHandler, Filters, CallbackQueryHandler)
+import configparser
+import datetime
+import io
+import logging
+import os
+import re
+import signal
+import sqlite3
 from functools import wraps
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ChatAction
-import logging, configparser, sqlite3, re, datetime, signal, os, io
+from telegram.ext import (Updater, CommandHandler, MessageHandler, Filters, CallbackQueryHandler)
 
 # logging initialize
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -54,6 +62,33 @@ def parse_sms(text: str) -> dict:
 
     return sms_data
 
+
+def valid_card(text: str) -> bool:
+    """
+    parses card number, returns True if proper format
+    """
+
+    card_pattern = '''
+    ^                          # matching from the start of the string
+    [A-Z]{4}\d{4}              # matching card
+    $                          # end of the string follows immediately
+    '''
+    return True if re.search(card_pattern, text, re.VERBOSE) else False
+
+
+def valid_period(text: str) -> bool:
+    """
+    parses period, returns True if proper format
+    valid ones are: 06 2017
+    """
+
+    period_pattern = '''
+    ^                          # matching from the start of the string
+    \d{2} \d{4}              # matching card
+    $                          # end of the string follows immediately
+    '''
+    return True if re.search(period_pattern, text, re.VERBOSE) else False
+
 # SQLite retrieval functions
 
 
@@ -69,6 +104,11 @@ def datatable_init():
                amount REAL,
                UNIQUE(chat_id, name, card, date_time, amount)
                )''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS users (
+               chat_id INTEGER,
+               ignore_card TEXT,
+               UNIQUE(chat_id, ignore_card)
+               )''')
     db.commit()
 
 
@@ -80,6 +120,28 @@ def insert_transaction(chat_id: int, username: str, sms_data: dict):
         cursor.execute("INSERT OR IGNORE INTO data VALUES (:id, :name, :card, :datetime, :amount)",
                        {'id': chat_id, 'name': username, 'card': sms_data['card'],
                         'datetime': sms_data['datetime'], 'amount': sms_data['amount']})
+
+
+def insert_ignored_card(chat_id: int, card: str):
+    """
+    takes in chat_id of the convo and a card to ignore, keeps the data in DB
+    """
+    with db:
+        cursor.execute("INSERT OR IGNORE INTO users VALUES (:id, :card)",
+                       {'id': chat_id, 'card': card})
+
+
+def remove_ignored_card(chat_id: int, card: str):
+    with db:
+        cursor.execute("DELETE FROM users WHERE chat_id=:id and ignore_card=:card",
+                       {'id': chat_id, 'card': card})
+
+
+def show_ignored_cards(chat_id: int) -> tuple:
+    with db:
+        cursor.execute("SELECT ignore_card FROM users WHERE chat_id=:id",
+                       {'id': chat_id})
+    return sum(cursor.fetchall(), ())
 
 
 def table_data() -> list:
@@ -127,6 +189,11 @@ def purge_all():
         cursor.execute("DELETE FROM data")
 
 
+def purge_user(user: int):
+    with db:
+        cursor.execute("DELETE FROM data WHERE chat_id=:id", {'id': user})
+
+
 # Bot handlers
 
 
@@ -159,21 +226,9 @@ def sms(bot, update):
         bot.send_message(chat_id=update.message.chat_id,
                          text='Unable to parse. Please, send valid SMS!')
         return None
-
-    # EXPERIMENTAL MENU PART
-
-#   if new_card(update.message.chat_id, sms['card']):
-#       bot.send_message(chat_id=update.message.chat_id,
-#            text="I don't have any records with this particular card number.")
-
-#       button_list = [InlineKeyboardButton("Yes, add it.", callback_data="1"),
-#                      InlineKeyboardButton("No, trash it!", callback_data="0")]
-#       reply_markup = InlineKeyboardMarkup(button_list)
-
-#       update.message.reply_text("Are you sure everything is correct?",
-#                        reply_markup=reply_markup)
-
-    # ENF OF MENU
+    if sms_p['card'] in show_ignored_cards(update.message.chat_id):
+        bot.send_message(chat_id=update.message.chat_id,
+                         text='You are trying to add a transaction from ignored card number.')
 
     insert_transaction(update.message.chat_id, update.message.from_user['username'], sms_p)
     bot.send_message(chat_id=update.message.chat_id,
@@ -217,18 +272,21 @@ def csv_parse(bot, update):
     bot.send_chat_action(chat_id=update.message.chat_id,
                          action=ChatAction.TYPING)
 
-    i,j = 0, 0
+    i,j,k = 0, 0, 0
     for line in csv_file_bin:
         try:
             parsed = parse_sms(line.decode('UTF-8').split(',')[-1])
-            insert_transaction(update.message.chat_id,
-                               update.message.from_user['username'], parsed)
+            if parsed['card'] not in show_ignored_cards(update.message.chat_id):
+                insert_transaction(update.message.chat_id,
+                                   update.message.from_user['username'], parsed)
+            else:
+                k += 1
             i += 1
             j += 1
         except AttributeError:
             j += 1
     bot.send_message(chat_id=update.message.chat_id,
-                     text="{} lines total, {} of them were parsed and added.".format(j, i))
+                     text="{} lines total, {} of them were parsed and added, {} were ignored.".format(j, i, k))
 
 
 @restricted
@@ -240,6 +298,10 @@ def purge_db(bot, update):
     update.message.reply_text("Are you sure you want to purge an entire database?",
                               reply_markup=reply_markup)
 
+def purgeuser(bot, update):
+    purge_user(update.message.chat_id)
+    bot.send_message(chat_id=update.message.chat_id,
+                     text="Purged your info")
 
 @restricted
 def dump_db(bot, update):
@@ -281,6 +343,34 @@ def wage_request(bot, update, args):
     bot.send_message(chat_id=update.message.chat_id,
                      text="Your wage in that period was {}".format(wage))
 
+def modify_ignore(bot, update, args):
+    ''' /modignore add|remove CARD '''
+    if len(args) != 2 or not valid_card(args[1]):
+        bot.send_message(chat_id=update.message.chat_id,
+                         text="Incorrect format")
+        if show_ignored_cards(update.message.chat_id) != []:
+            bot.send_message(chat_id=update.message.chat_id,
+                    text="Ignored cards are:")
+            bot.send_message(chat_id=update.message.chat_id,
+                    text=show_ignored_cards(update.message.chat_id))
+            return None
+        else:
+            bot.send_message(chat_id=update.message.chat_id,
+                    text="No ignored cards for this user in database.")
+            return None
+
+    if args[0] == "add":
+        bot.send_message(chat_id=update.message.chat_id,
+                         text="Adding {} to the list of ignored cards.".format(args[1]))
+        insert_ignored_card(update.message.chat_id, args[1])
+    elif args[0] == "remove":
+        bot.send_message(chat_id=update.message.chat_id,
+                         text="Removing {} from the list of ignored cards.".format(args[1]))
+        remove_ignored_card(update.message.chat_id, args[1])
+    else:
+        bot.send_message(chat_id=update.message.chat_id,
+                         text="Incorrect format")
+
 
 def user_info(bot, update):
     bot.send_message(chat_id=update.message.chat_id,
@@ -315,7 +405,9 @@ def main():
     dumpdb_handler = CommandHandler('dumpdb', dump_db)
     userinfo_handler = CommandHandler('userinfo', user_info)
     purgedb_handler = CommandHandler('purgedb', purge_db)
+    purgeuser_handler = CommandHandler('purgeuser', purgeuser)
     wagerequest_handler = CommandHandler('wage', wage_request, pass_args=True)
+    modifyignore_handler = CommandHandler('modignore', modify_ignore, pass_args=True)
     sms_handler = MessageHandler(Filters.text, sms)
     csv_handler = MessageHandler(Filters.document, csv_parse)
     button_handler = CallbackQueryHandler(button)
@@ -326,9 +418,11 @@ def main():
     dispatcher.add_handler(dumpdb_handler)
     dispatcher.add_handler(userinfo_handler)
     dispatcher.add_handler(purgedb_handler)
+    dispatcher.add_handler(purgeuser_handler)
     dispatcher.add_handler(sms_handler)
     dispatcher.add_handler(csv_handler)
     dispatcher.add_handler(wagerequest_handler)
+    dispatcher.add_handler(modifyignore_handler)
     dispatcher.add_handler(button_handler)
     dispatcher.add_error_handler(error)
     # unknown handler should go last!

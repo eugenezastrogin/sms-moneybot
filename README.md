@@ -1,4 +1,4 @@
-# SMS-MONEYBOT
+# sms-moneybot
 
 SMS parsing telegram bot that keeps track of your salary
 
@@ -20,7 +20,7 @@ They have to be of the following type (standard SBERBANK SMS):
 
 Offers multiple commands to get statistics on your salary.
 
-List of commands:
+_____List of commands:__
 
 /userdata - returns all user db records
 
@@ -28,8 +28,12 @@ List of commands:
 
 /wage MM YYYY (both arguments are optional, if none given simply returns last month's data)
 
+/modignore add|remove CARD - manages list of ignored cards, records with card numbers in it won't be added through CSV import or text messages
 
-Admin commands:
+/purgeuser - deletes all transaction records of user
+
+
+__Admin commands:__
 
 /purgedb - purges an entire database
 
