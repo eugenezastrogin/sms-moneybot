@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# _*_ coding: utf-8 _*_
 import configparser
 import datetime
 import io
@@ -8,10 +7,12 @@ import os
 import re
 import signal
 import sqlite3
+
 from functools import wraps
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ChatAction
-from telegram.ext import (Updater, CommandHandler, MessageHandler, Filters, CallbackQueryHandler)
+from telegram.ext import (Updater, CommandHandler, MessageHandler, Filters,
+                          CallbackQueryHandler, ConversationHandler)
 
 # logging initialize
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -37,7 +38,7 @@ db_path = os.path.join(BASE_DIR, "data.db")
 
 def parse_sms(text: str) -> dict:
     """
-    parses SMS using re, example of a valid SMS (only sberbank is supported ATM):
+    Parses SMS using re, example of a valid SMS (only sberbank is supported ATM):
     VISA1234 21.12.16 22:12
     зачисление зарплаты 12345.57р
     Баланс: 16063.28р
@@ -48,7 +49,7 @@ def parse_sms(text: str) -> dict:
     # matching anywhere in string
     ([A-Z]{4}\d{4})                        # matching card
     \ +                                    # separator is one space or more
-    (\d{2}\.\d{2}\.\d{2}\ \d{2}\:\d{2})    # matching date and time
+    (\d{2}\.\d{2}\.\d{2}\ \d{2}:\d{2})    # matching date and time
     \D*                       # optional separator is any number of non digits
     зарплаты
     \D*                       # optional separator is any number of non digits
@@ -57,7 +58,8 @@ def parse_sms(text: str) -> dict:
 
     parsed_sms = sms_pattern.search(text).groups()
     sms_data['card'] = parsed_sms[0]
-    sms_data['datetime'] = datetime.datetime.strptime(parsed_sms[1], "%d.%m.%y %H:%M")
+    sms_data['datetime'] = datetime.datetime.strptime(parsed_sms[1],
+                                                      "%d.%m.%y %H:%M")
     sms_data['amount'] = float(parsed_sms[2])
 
     return sms_data
@@ -65,7 +67,7 @@ def parse_sms(text: str) -> dict:
 
 def valid_card(text: str) -> bool:
     """
-    parses card number, returns True if proper format
+    Parses card number, returns True if proper format
     """
 
     card_pattern = '''
@@ -75,26 +77,12 @@ def valid_card(text: str) -> bool:
     '''
     return True if re.search(card_pattern, text, re.VERBOSE) else False
 
-
-def valid_period(text: str) -> bool:
-    """
-    parses period, returns True if proper format
-    valid ones are: 06 2017
-    """
-
-    period_pattern = '''
-    ^                          # matching from the start of the string
-    \d{2} \d{4}              # matching card
-    $                          # end of the string follows immediately
-    '''
-    return True if re.search(period_pattern, text, re.VERBOSE) else False
-
 # SQLite retrieval functions
 
 
 def datatable_init():
     """
-    creates if necessary data.db SQLite database
+    Creates if necessary data.db SQLite database
     """
     cursor.execute('''CREATE TABLE IF NOT EXISTS data (
                chat_id INTEGER,
@@ -114,17 +102,18 @@ def datatable_init():
 
 def insert_transaction(chat_id: int, username: str, sms_data: dict):
     """
-    takes in chat_id of the convo and parsed sms dictionary, writes data into DB
+    Takes in chat_id of the convo and parsed sms dictionary, writes data into DB
     """
     with db:
-        cursor.execute("INSERT OR IGNORE INTO data VALUES (:id, :name, :card, :datetime, :amount)",
-                       {'id': chat_id, 'name': username, 'card': sms_data['card'],
-                        'datetime': sms_data['datetime'], 'amount': sms_data['amount']})
+        cursor.execute("INSERT OR IGNORE INTO data \
+            VALUES (:id, :name, :card, :datetime, :amount)",
+            {'id': chat_id, 'name': username, 'card': sms_data['card'],
+             'datetime': sms_data['datetime'], 'amount': sms_data['amount']})
 
 
 def insert_ignored_card(chat_id: int, card: str):
     """
-    takes in chat_id of the convo and a card to ignore, keeps the data in DB
+    Takes in chat_id of the convo and a card to ignore, keeps the data in DB
     """
     with db:
         cursor.execute("INSERT OR IGNORE INTO users VALUES (:id, :card)",
@@ -146,7 +135,7 @@ def show_ignored_cards(chat_id: int) -> tuple:
 
 def table_data() -> list:
     """
-    returns ALL available data, list of tuples
+    Returns ALL available data, list of tuples
     """
     cursor.execute("SELECT * FROM data")
     return cursor.fetchall()
@@ -154,7 +143,7 @@ def table_data() -> list:
 
 def user_data(chat_id: str) -> list:
     """
-    returns user data, list of tuples
+    Returns user data, list of tuples
     """
     cursor.execute("SELECT * FROM data WHERE chat_id=:id", {'id': chat_id})
     return cursor.fetchall()
@@ -162,24 +151,26 @@ def user_data(chat_id: str) -> list:
 
 def new_card(chat_id: str, card: str) -> bool:
     """
-    checks whether this card type and number already in DB for this user
+    Checks whether this card type and number already in DB for this user
     """
     cursor.execute("SELECT COUNT(*) FROM data WHERE chat_id=:id AND card=:card",
-            {'id': chat_id, 'card': card})
+        {'id': chat_id, 'card': card})
     return False if cursor.fetchone()[0] > 0 else True
 
 
 def user_records(chat_id: str) -> list:
     """
-    returns number of relevant user records
+    Returns number of relevant user records
     """
-    cursor.execute("SELECT COUNT(*) FROM data WHERE chat_id=:id", {'id': chat_id})
+    cursor.execute("SELECT COUNT(*) FROM data WHERE chat_id=:id",
+                  {'id': chat_id})
     return cursor.fetchone()[0]
 
 
 def wage_calc(chat_id: str, start_date, end_date) -> list:
-    cursor.execute("SELECT SUM(amount) FROM data WHERE chat_id=:id \
-                    AND date_time BETWEEN :sd and :ed",
+    cursor.execute('''SELECT SUM(amount)
+                      FROM data WHERE chat_id=:id
+                      AND date_time BETWEEN :sd and :ed''',
                   {'id': chat_id, 'sd': start_date, 'ed': end_date})
     return cursor.fetchone()[0]
 
@@ -204,20 +195,21 @@ def restricted(func):
         if user_id not in admin_list:
             bot.send_message(chat_id=update.message.chat_id,
                              text="You don't have access to this command.")
-            return
+            return None
         return func(bot, update, *args, **kwargs)
     return wrapped
 
 
 def start(bot, update):
     bot.send_message(chat_id=update.message.chat_id,
-                     text='This bot parses and stores info about your monthly earnings!')
-    bot.send_message(chat_id=update.message.chat_id, text='Please, send SMS from the bank')
+        text='This bot parses and stores info about your monthly earnings!')
+    bot.send_message(chat_id=update.message.chat_id,
+        text='Please, send SMS from the bank')
 
 
 def sms(bot, update):
     """
-    on receiving SMS, tries to parse it and add to DB, otherwise reprompts user.
+    On receiving SMS, tries to parse it and add to DB, otherwise reprompts user.
     Also shows accumulative wage in a month that SMS was from
     """
     try:
@@ -225,12 +217,14 @@ def sms(bot, update):
     except AttributeError:
         bot.send_message(chat_id=update.message.chat_id,
                          text='Unable to parse. Please, send valid SMS!')
-        return None
+        return
+
     if sms_p['card'] in show_ignored_cards(update.message.chat_id):
         bot.send_message(chat_id=update.message.chat_id,
-                         text='You are trying to add a transaction from ignored card number.')
+            text='You are trying to add a transaction from ignored card number.')
 
-    insert_transaction(update.message.chat_id, update.message.from_user['username'], sms_p)
+    insert_transaction(update.message.chat_id,
+                       update.message.from_user['username'], sms_p)
     bot.send_message(chat_id=update.message.chat_id,
                      text='Transaction added successfully!')
 
@@ -249,7 +243,7 @@ def sms(bot, update):
         end_date = datetime.datetime(now.year, month, separator_date)
         wage = wage_calc(update.message.chat_id, start_date, end_date)
         bot.send_message(chat_id=update.message.chat_id,
-                         text="Your wage in that month is {} so far".format(wage))
+            text="Your wage in that month is {} so far".format(wage))
 
 
 def csv_parse(bot, update):
@@ -282,17 +276,20 @@ def csv_parse(bot, update):
             else:
                 k += 1
             i += 1
-            j += 1
         except AttributeError:
+            pass
+        finally:
             j += 1
+
     bot.send_message(chat_id=update.message.chat_id,
-                     text="{} lines total, {} of them were parsed and added, {} were ignored.".format(j, i, k))
+        text="{} lines total, {} of them were parsed and added, {} were ignored."
+        .format(j, i, k))
 
 
 @restricted
 def purge_db(bot, update):
     keyboard = [[InlineKeyboardButton("Yes, drop it!", callback_data="DROP")],
-                [InlineKeyboardButton("No, wait!", callback_data="0")]]
+                [InlineKeyboardButton("No, wait!", callback_data="NODROP")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     update.message.reply_text("Are you sure you want to purge an entire database?",
@@ -315,40 +312,64 @@ def user_data(bot, update):
 
 
 def wage_request(bot, update, args):
-    """ takes arguments, tries to parse them and return wage for the mentioned
-    period
-    for now: 06 2017"""
-    if len(args) == 0:
+    """
+    Takes arguments, tries to parse them and return wage for the mentioned
+    period. For now: 06 2017
+    """
+    def is_month(text:str) -> bool:
+        try:
+            return 0 < int(text) < 32
+        except ValueError:
+            return False
+
+    def is_year(text:str) -> bool:
+        try:
+            return 1999 < int(text) < 2051
+        except ValueError:
+            return False
+
+    # testing for proper input
+    if len(args) == 2 and is_month(args[0]) and is_year(args[1]):
+        pass
+    elif len(args) == 1 and (is_month(args[0]) or is_year(args[0])):
+        pass
+    else:
+        bot.send_message(chat_id=update.message.chat_id,
+                         text="Incorrect format")
+        return None
+
+    if len(args) == 2:
+        month = int(args[0])
+        year = int(args[1])
+        start_date = datetime.datetime(year, month-1, separator_date)
+        end_date = datetime.datetime(year, month, separator_date)
+    elif len(args) == 1:
+        if is_month(args[0]):
+            month = int(args[0])
+            year = datetime.datetime.now().year
+            start_date = datetime.datetime(year, month-1, separator_date)
+            end_date = datetime.datetime(year, month, separator_date)
+        elif is_year(args[0]):
+            # entire year
+            year = int(args[0])
+            start_date = datetime.datetime(year-1, 12, separator_date)
+            end_date = datetime.datetime(year, 12, separator_date)
+    else:
         now = datetime.datetime.now()
         month = now.month if now.day > separator_date else now.month - 1
         start_date = datetime.datetime(now.year, month-1, separator_date)
         end_date = datetime.datetime(now.year, month, separator_date)
-    elif len(args) == 1:
-        if len(args[0]) > 2:
-            # entire year
-            pass
-        else:
-            month = args[0]
-            year = datetime.datetime.now().year
-            month = now.month if now.day > separator_date else now.month - 1
-            start_date = datetime.datetime(year, month-1, separator_date)
-            end_date = datetime.datetime(year, month, separator_date)
-    else:
-        month = args[0]
-        year = args[1]
-        start_date = datetime.datetime(year, month-1, separator_date)
-        end_date = datetime.datetime(year, month, separator_date)
 
     wage = wage_calc(update.message.chat_id, start_date, end_date)
     bot.send_message(chat_id=update.message.chat_id,
                      text="Your wage in that period was {}".format(wage))
 
 def modify_ignore(bot, update, args):
-    ''' /modignore add|remove CARD '''
+    """ /modignore add|remove CARD """
     if len(args) != 2 or not valid_card(args[1]):
         bot.send_message(chat_id=update.message.chat_id,
                          text="Incorrect format")
-        if show_ignored_cards(update.message.chat_id) != []:
+        if show_ignored_cards(update.message.chat_id):
             bot.send_message(chat_id=update.message.chat_id,
                     text="Ignored cards are:")
             bot.send_message(chat_id=update.message.chat_id,
@@ -361,11 +382,12 @@ def modify_ignore(bot, update, args):
 
     if args[0] == "add":
         bot.send_message(chat_id=update.message.chat_id,
-                         text="Adding {} to the list of ignored cards.".format(args[1]))
+            text="Adding {} to the list of ignored cards.".format(args[1]))
         insert_ignored_card(update.message.chat_id, args[1])
     elif args[0] == "remove":
         bot.send_message(chat_id=update.message.chat_id,
-                         text="Removing {} from the list of ignored cards.".format(args[1]))
+                         text="Removing {} from the list of ignored cards.".
+                         format(args[1]))
         remove_ignored_card(update.message.chat_id, args[1])
     else:
         bot.send_message(chat_id=update.message.chat_id,
@@ -374,16 +396,16 @@ def modify_ignore(bot, update, args):
 
 def user_info(bot, update):
     bot.send_message(chat_id=update.message.chat_id,
-                 text="Your chat_id is {}, we have {} records concerning you".
-                 format(update.message.chat_id, user_records(update.message.chat_id)))
+        text="Your chat_id is {}, we have {} records concerning you".
+        format(update.message.chat_id, user_records(update.message.chat_id)))
 
 
 def button(bot, update):
     query = update.callback_query
 
     if query.data == "DROP":
-    #   bot.send_message(chat_id=update.message.chat_id,
-    #                    text="Well, you asked for it, PURGING DB")
+        bot.send_message(chat_id=query.message.chat_id,
+                         text="Well, you asked for it, PURGING DB")
         purge_all()
 
 
@@ -413,6 +435,9 @@ def main():
     button_handler = CallbackQueryHandler(button)
     unknown_handler = MessageHandler(Filters.command, unknown)
 
+   #conv_handler = ConversationHandler(
+   #    entry_points=[CommandHandler
+
     dispatcher.add_handler(start_handler)
     dispatcher.add_handler(userdata_handler)
     dispatcher.add_handler(dumpdb_handler)
@@ -423,9 +448,10 @@ def main():
     dispatcher.add_handler(csv_handler)
     dispatcher.add_handler(wagerequest_handler)
     dispatcher.add_handler(modifyignore_handler)
-    dispatcher.add_handler(button_handler)
+   #dispatcher.add_handler(conv_handler)
+   #dispatcher.add_handler(button_handler)
     dispatcher.add_error_handler(error)
-    # unknown handler should go last!
+    # Unknown handler should go last!
     dispatcher.add_handler(unknown_handler)
 
     updater.start_polling()
