@@ -12,7 +12,7 @@ from functools import wraps
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ChatAction
 from telegram.ext import (Updater, CommandHandler, MessageHandler, Filters,
-                          CallbackQueryHandler, ConversationHandler)
+                          CallbackQueryHandler )
 
 # logging initialize
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -49,11 +49,11 @@ def parse_sms(text: str) -> dict:
     # matching anywhere in string
     ([A-Z]{4}\d{4})                        # matching card
     \ +                                    # separator is one space or more
-    (\d{2}\.\d{2}\.\d{2}\ \d{2}:\d{2})    # matching date and time
+    (\d{2}\.\d{2}\.\d{2}\ \d{2}:\d{2})     # matching date and time
     \D*                       # optional separator is any number of non digits
     зарплаты
     \D*                       # optional separator is any number of non digits
-    (\d+\.*\d*)                             # matching amount
+    (\d+\.*\d*)                            # matching amount
     ''', re.VERBOSE)
 
     parsed_sms = sms_pattern.search(text).groups()
@@ -95,7 +95,8 @@ def datatable_init():
     cursor.execute('''CREATE TABLE IF NOT EXISTS users (
                chat_id INTEGER,
                ignore_card TEXT,
-               UNIQUE(chat_id, ignore_card)
+               notify INTEGER,
+               UNIQUE(chat_id, ignore_card, notify)
                )''')
     db.commit()
 
@@ -133,6 +134,13 @@ def show_ignored_cards(chat_id: int) -> tuple:
     return sum(cursor.fetchall(), ())
 
 
+def to_notify(chat_id: int) -> tuple:
+    with db:
+        cursor.execute("SELECT notify FROM users WHERE chat_id=:id",
+                       {'id': chat_id})
+    return sum(cursor.fetchall(), ())
+
+
 def table_data() -> list:
     """
     Returns ALL available data, list of tuples
@@ -163,7 +171,7 @@ def user_records(chat_id: str) -> list:
     Returns number of relevant user records
     """
     cursor.execute("SELECT COUNT(*) FROM data WHERE chat_id=:id",
-                  {'id': chat_id})
+                   {'id': chat_id})
     return cursor.fetchone()[0]
 
 
@@ -171,7 +179,7 @@ def wage_calc(chat_id: str, start_date, end_date) -> list:
     cursor.execute('''SELECT SUM(amount)
                       FROM data WHERE chat_id=:id
                       AND date_time BETWEEN :sd and :ed''',
-                  {'id': chat_id, 'sd': start_date, 'ed': end_date})
+                   {'id': chat_id, 'sd': start_date, 'ed': end_date})
     return cursor.fetchone()[0]
 
 
@@ -210,14 +218,16 @@ def start(bot, update):
 def sms(bot, update):
     """
     On receiving SMS, tries to parse it and add to DB, otherwise reprompts user.
-    Also shows accumulative wage in a month that SMS was from
+    Also shows accumulative wage in a month that SMS was from.
+    If to_notify is not empty, sends an info message to all users in a notify
+    list.
     """
     try:
         sms_p = parse_sms(update.message.text)
     except AttributeError:
         bot.send_message(chat_id=update.message.chat_id,
                          text='Unable to parse. Please, send valid SMS!')
-        return
+        return None
 
     if sms_p['card'] in show_ignored_cards(update.message.chat_id):
         bot.send_message(chat_id=update.message.chat_id,
@@ -227,6 +237,11 @@ def sms(bot, update):
                        update.message.from_user['username'], sms_p)
     bot.send_message(chat_id=update.message.chat_id,
                      text='Transaction added successfully!')
+
+    for recipient in to_notify:
+        bot.send_message(chat_id=recipient,
+            text='{} just added the following message: \n {}'.
+            format(update.message.from_user['username'], update.message.text))
 
     if sms['datetime'].date() == datetime.datetime.now().date():
         now = datetime.datetime.now()
@@ -288,17 +303,24 @@ def csv_parse(bot, update):
 
 @restricted
 def purge_db(bot, update):
-    keyboard = [[InlineKeyboardButton("Yes, drop it!", callback_data="DROP")],
+    keyboard = [[InlineKeyboardButton("Yes, drop DB!", callback_data="DROPDB")],
                 [InlineKeyboardButton("No, wait!", callback_data="NODROP")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     update.message.reply_text("Are you sure you want to purge an entire database?",
                               reply_markup=reply_markup)
+    return PURGE_DB
+
 
 def purgeuser(bot, update):
-    purge_user(update.message.chat_id)
-    bot.send_message(chat_id=update.message.chat_id,
-                     text="Purged your info")
+    keyboard = [[InlineKeyboardButton("Yes, drop me!", callback_data="DROPUSER")],
+                [InlineKeyboardButton("No, wait!", callback_data="NODROP")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    update.message.reply_text("Are you sure you want to purge all your records?",
+                              reply_markup=reply_markup)
+    return PURGE_USER
+
 
 @restricted
 def dump_db(bot, update):
@@ -316,13 +338,13 @@ def wage_request(bot, update, args):
     Takes arguments, tries to parse them and return wage for the mentioned
     period. For now: 06 2017
     """
-    def is_month(text:str) -> bool:
+    def is_month(text: str) -> bool:
         try:
             return 0 < int(text) < 32
         except ValueError:
             return False
 
-    def is_year(text:str) -> bool:
+    def is_year(text: str) -> bool:
         try:
             return 1999 < int(text) < 2051
         except ValueError:
@@ -361,8 +383,14 @@ def wage_request(bot, update, args):
         end_date = datetime.datetime(now.year, month, separator_date)
 
     wage = wage_calc(update.message.chat_id, start_date, end_date)
-    bot.send_message(chat_id=update.message.chat_id,
-                     text="Your wage in that period was {}".format(wage))
+
+    if wage is not None:
+        bot.send_message(chat_id=update.message.chat_id,
+                text="Your wage in that period was {:.2f}".format(wage))
+    else:
+        bot.send_message(chat_id=update.message.chat_id,
+                         text="Sorry, we do not have any data for that period")
+
 
 def modify_ignore(bot, update, args):
     """ /modignore add|remove CARD """
@@ -400,13 +428,28 @@ def user_info(bot, update):
         format(update.message.chat_id, user_records(update.message.chat_id)))
 
 
-def button(bot, update):
+def purgedb_commence(bot, update):
     query = update.callback_query
 
-    if query.data == "DROP":
+    if query.data == "DROPDB":
         bot.send_message(chat_id=query.message.chat_id,
                          text="Well, you asked for it, PURGING DB")
         purge_all()
+
+
+def purgeuser_commence(bot, update):
+    query = update.callback_query
+
+    if query.data == "DROPUSER":
+        purge_user(query.message.chat_id)
+        bot.send_message(chat_id=query.message.chat_id,
+                         text="Purged your info")
+
+
+def cancel(bot, update):
+    query = update.callback_query
+
+    bot.send_message(chat_id=query.message.chat_id, text="Action cancelled!")
 
 
 def unknown(bot, update):
@@ -429,14 +472,25 @@ def main():
     purgedb_handler = CommandHandler('purgedb', purge_db)
     purgeuser_handler = CommandHandler('purgeuser', purgeuser)
     wagerequest_handler = CommandHandler('wage', wage_request, pass_args=True)
-    modifyignore_handler = CommandHandler('modignore', modify_ignore, pass_args=True)
+    modifyignore_handler = CommandHandler('modignore', modify_ignore,
+                                          pass_args=True)
     sms_handler = MessageHandler(Filters.text, sms)
     csv_handler = MessageHandler(Filters.document, csv_parse)
-    button_handler = CallbackQueryHandler(button)
+    purgedbcommence_handler = CallbackQueryHandler(purgedb_commence,
+                                                   pattern='DROPDB')
+    purgeusercommence_handler = CallbackQueryHandler(purgeuser_commence,
+                                                     pattern='DROPUSER')
+    cancel_handler = CallbackQueryHandler(cancel)
     unknown_handler = MessageHandler(Filters.command, unknown)
 
-   #conv_handler = ConversationHandler(
-   #    entry_points=[CommandHandler
+#   conv_handler = ConversationHandler(
+#       entry_points=[purgedb_handler, purgeuser_handler],
+#       states={
+#           PURGE_USER: [CallbackQueryHandler(purgeuser_commence)],
+#           PURGE_DB: [CallbackQueryHandler(purgedb_commence)]
+#       },
+#       fallbacks=[CommandHandler('cancel', cancel)]
+#   )
 
     dispatcher.add_handler(start_handler)
     dispatcher.add_handler(userdata_handler)
@@ -448,8 +502,10 @@ def main():
     dispatcher.add_handler(csv_handler)
     dispatcher.add_handler(wagerequest_handler)
     dispatcher.add_handler(modifyignore_handler)
-   #dispatcher.add_handler(conv_handler)
-   #dispatcher.add_handler(button_handler)
+    dispatcher.add_handler(purgeusercommence_handler)
+    dispatcher.add_handler(purgedbcommence_handler)
+    dispatcher.add_handler(cancel_handler)
+#   dispatcher.add_handler(conv_handler)
     dispatcher.add_error_handler(error)
     # Unknown handler should go last!
     dispatcher.add_handler(unknown_handler)

@@ -20,7 +20,7 @@ They have to be of the following type (standard SBERBANK SMS):
 
 Offers multiple commands to get statistics on your salary.
 
-_____List of commands:__
+__List of commands:__
 
 /userdata - returns all user db records
 
