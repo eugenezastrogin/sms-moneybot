@@ -5,6 +5,7 @@ import io
 import logging
 import os
 import re
+import csv
 import signal
 import sqlite3
 
@@ -21,19 +22,27 @@ logger = logging.getLogger(__name__)
 
 # config initializing
 config = configparser.ConfigParser()
+print("Reading config...")
 config.read('config.ini')
-separator_date = int(config['DEFAULT']['separator_date'])
+try:
+    separator_date = int(config['DEFAULT']['separator_date'])
+    updater = Updater(token=config['DEFAULT']['token'])
+    admin_list = [int(x) for x in config['DEFAULT']['admin_list'].split(',')]
+    print("Configuration initialized!")
+except KeyError:
+    print("Make sure you copied sample config.ini and replaced TOKEN in it")
+    print("Exiting...")
+    exit()
+
 
 # telegram bot initializing
-updater = Updater(token=config['DEFAULT']['token'])
-admin_list = [int(x) for x in config['DEFAULT']['admin_list'].split(',')]
 dispatcher = updater.dispatcher
 
 # SQLite initializing
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 db_path = os.path.join(BASE_DIR, "data.db")
 
-# Generic functions
+# {{{ Generic functions
 
 
 def parse_sms(text: str) -> dict:
@@ -77,7 +86,9 @@ def valid_card(text: str) -> bool:
     '''
     return True if re.search(card_pattern, text, re.VERBOSE) else False
 
-# SQLite retrieval functions
+# }}}
+
+# {{{ SQLite retrieval functions
 
 
 def datatable_init():
@@ -92,11 +103,15 @@ def datatable_init():
                amount REAL,
                UNIQUE(chat_id, name, card, date_time, amount)
                )''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS users (
+    cursor.execute('''CREATE TABLE IF NOT EXISTS ignored_cards (
                chat_id INTEGER,
                ignore_card TEXT,
+               UNIQUE(chat_id, ignore_card)
+               )''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS notified (
+               chat_id INTEGER,
                notify INTEGER,
-               UNIQUE(chat_id, ignore_card, notify)
+               UNIQUE(chat_id, notify)
                )''')
     db.commit()
 
@@ -117,26 +132,39 @@ def insert_ignored_card(chat_id: int, card: str):
     Takes in chat_id of the convo and a card to ignore, keeps the data in DB
     """
     with db:
-        cursor.execute("INSERT OR IGNORE INTO users VALUES (:id, :card)",
+        cursor.execute("INSERT OR IGNORE INTO ignored_cards VALUES (:id, :card)",
                        {'id': chat_id, 'card': card})
 
 
 def remove_ignored_card(chat_id: int, card: str):
     with db:
-        cursor.execute("DELETE FROM users WHERE chat_id=:id and ignore_card=:card",
+        cursor.execute("DELETE FROM ignored_cards \
+                        WHERE chat_id=:id and ignore_card=:card",
                        {'id': chat_id, 'card': card})
+
+
+def insert_notify(chat_id: int, notified: int):
+    with db:
+        cursor.execute("INSERT OR IGNORE INTO notified VALUES (:id, :notified)",
+                       {'id': chat_id, 'notified': notified})
 
 
 def show_ignored_cards(chat_id: int) -> tuple:
     with db:
-        cursor.execute("SELECT ignore_card FROM users WHERE chat_id=:id",
+        cursor.execute("SELECT ignore_card FROM ignored_cards WHERE chat_id=:id",
                        {'id': chat_id})
     return sum(cursor.fetchall(), ())
 
 
+def remove_notify(chat_id: int, notified: int):
+    with db:
+        cursor.execute("DELETE FROM notified WHERE chat_id=:id and notify=:card",
+                       {'id': chat_id, 'notified': notified})
+
+
 def to_notify(chat_id: int) -> tuple:
     with db:
-        cursor.execute("SELECT notify FROM users WHERE chat_id=:id",
+        cursor.execute("SELECT notify FROM notified WHERE chat_id=:id",
                        {'id': chat_id})
     return sum(cursor.fetchall(), ())
 
@@ -193,7 +221,15 @@ def purge_user(user: int):
         cursor.execute("DELETE FROM data WHERE chat_id=:id", {'id': user})
 
 
-# Bot handlers
+def chatid_from_name(user: str) -> int:
+    with db:
+        cursor.execute("SELECT name FROM data WHERE chat_id=:id", {'id': user})
+    return cursor.fetchone()[0]
+
+
+# }}}
+
+# {{{ Bot handlers
 
 
 def restricted(func):
@@ -238,12 +274,12 @@ def sms(bot, update):
     bot.send_message(chat_id=update.message.chat_id,
                      text='Transaction added successfully!')
 
-    for recipient in to_notify:
+    for recipient in to_notify(update.message.chat_id):
         bot.send_message(chat_id=recipient,
             text='{} just added the following message: \n {}'.
             format(update.message.from_user['username'], update.message.text))
 
-    if sms['datetime'].date() == datetime.datetime.now().date():
+    if sms_p['datetime'].date() == datetime.datetime.now().date():
         now = datetime.datetime.now()
         month = now.month if now.day > separator_date else now.month - 1
         start_date = datetime.datetime(now.year, month-1, separator_date)
@@ -252,7 +288,7 @@ def sms(bot, update):
         bot.send_message(chat_id=update.message.chat_id,
                          text="Your last month's wage is {} so far".format(wage))
     else:
-        now = sms['datetime']
+        now = sms_p['datetime']
         month = now.month if now.day > separator_date else now.month - 1
         start_date = datetime.datetime(now.year, month-1, separator_date)
         end_date = datetime.datetime(now.year, month, separator_date)
@@ -301,6 +337,19 @@ def csv_parse(bot, update):
         .format(j, i, k))
 
 
+def form_csv(bot, update):
+    bot.send_message(chat_id=update.message.chat_id,
+                     text="Preparing CSV file...")
+    bot.send_chat_action(chat_id=update.message.chat_id,
+                         action=ChatAction.TYPING)
+    csv_file = io.StringIO()
+    csv_writer = csv.writer(csv_file)
+    for row in SQL_COMMAND:
+        csv_writer.writerow(row)
+    bot.send_document(chat_id=update.message.chat_id, filename='test.csv',
+                      document=csv_file)
+
+
 @restricted
 def purge_db(bot, update):
     keyboard = [[InlineKeyboardButton("Yes, drop DB!", callback_data="DROPDB")],
@@ -333,10 +382,10 @@ def user_data(bot, update):
                      text=str(user_data(update.message.chat_id)))
 
 
-def wage_request(bot, update, args):
+def wage_template(bot, update, args, user=0):
     """
     Takes arguments, tries to parse them and return wage for the mentioned
-    period. For now: 06 2017
+    period. Example input: 06 2017
     """
     def is_month(text: str) -> bool:
         try:
@@ -382,14 +431,29 @@ def wage_request(bot, update, args):
         start_date = datetime.datetime(now.year, month-1, separator_date)
         end_date = datetime.datetime(now.year, month, separator_date)
 
-    wage = wage_calc(update.message.chat_id, start_date, end_date)
+    if user == 0:
+        wage = wage_calc(update.message.chat_id, start_date, end_date)
+    else:
+        wage = wage_calc(user, start_date, end_date)
 
     if wage is not None:
         bot.send_message(chat_id=update.message.chat_id,
-                text="Your wage in that period was {:.2f}".format(wage))
+                text="Wage in that period was {:.2f}".format(wage))
     else:
         bot.send_message(chat_id=update.message.chat_id,
                          text="Sorry, we do not have any data for that period")
+
+
+def wage_request(bot, update, args):
+    """ Returns wage data for current user """
+    return wage_template(bot, update, args)
+
+
+@restricted
+def wage_admingrequest(bot, update, args):
+    """ Returns wage data for arbitrary user. Available to admins only """
+    return wage_template(bot, update, args=args[1:],
+                         user=chatid_from_name(args[0]))
 
 
 def modify_ignore(bot, update, args):
@@ -422,6 +486,38 @@ def modify_ignore(bot, update, args):
                          text="Incorrect format")
 
 
+def modify_notify(bot, update, args):
+    """ /modnotify add|remove notified """
+    if len(args) != 2:
+        bot.send_message(chat_id=update.message.chat_id,
+                         text="Incorrect format")
+        if to_notify(update.message.chat_id):
+            bot.send_message(chat_id=update.message.chat_id,
+                    text="chat_id's of the notified are:")
+            bot.send_message(chat_id=update.message.chat_id,
+                    text=to_notify(update.message.chat_id))
+            return None
+        else:
+            bot.send_message(chat_id=update.message.chat_id,
+                    text="Notify list is empty for this user.")
+            return None
+
+    if args[0] == "add":
+        bot.send_message(chat_id=update.message.chat_id,
+            text="Adding {} to the list of notified.".format(args[1]))
+        insert_notify(update.message.chat_id, args[1])
+        bot.send_message(chat_id=update.message.chat_id,
+            text=to_notify(update.message.chat_id))
+    elif args[0] == "remove":
+        bot.send_message(chat_id=update.message.chat_id,
+                         text="Removing {} from the list of notified.".
+                         format(args[1]))
+        remove_notify(update.message.chat_id, args[1])
+    else:
+        bot.send_message(chat_id=update.message.chat_id,
+                         text="Incorrect format")
+
+
 def user_info(bot, update):
     bot.send_message(chat_id=update.message.chat_id,
         text="Your chat_id is {}, we have {} records concerning you".
@@ -433,17 +529,19 @@ def purgedb_commence(bot, update):
 
     if query.data == "DROPDB":
         bot.send_message(chat_id=query.message.chat_id,
-                         text="Well, you asked for it, PURGING DB")
+                         text="Well, you asked for it, purging database...")
         purge_all()
+        bot.send_message(chat_id=query.message.chat_id, text="DONE!")
 
 
 def purgeuser_commence(bot, update):
     query = update.callback_query
 
     if query.data == "DROPUSER":
-        purge_user(query.message.chat_id)
         bot.send_message(chat_id=query.message.chat_id,
-                         text="Purged your info")
+                         text="Purging your info from the database...")
+        purge_user(query.message.chat_id)
+        bot.send_message(chat_id=query.message.chat_id, text="DONE!")
 
 
 def cancel(bot, update):
@@ -461,10 +559,13 @@ def error(bot, update, error):
     """Log Errors caused by Updates."""
     logger.warning('Update "%s" caused error "%s"', update, error)
 
-# MAIN LOOP HERE
+# }}}
+
+# ------------------------ MAIN LOOP -------------------------------
 
 
 def main():
+    print("Adding handlers...")
     start_handler = CommandHandler('start', start)
     userdata_handler = CommandHandler('userdata', user_data)
     dumpdb_handler = CommandHandler('dumpdb', dump_db)
@@ -472,8 +573,13 @@ def main():
     purgedb_handler = CommandHandler('purgedb', purge_db)
     purgeuser_handler = CommandHandler('purgeuser', purgeuser)
     wagerequest_handler = CommandHandler('wage', wage_request, pass_args=True)
+    wageadminrequest_handler = CommandHandler('wagedb', wage_admingrequest,
+                                         pass_args=True)
     modifyignore_handler = CommandHandler('modignore', modify_ignore,
                                           pass_args=True)
+    modifynotify_handler = CommandHandler('modnotify', modify_notify,
+                                          pass_args=True)
+    formcsv_handler = CommandHandler('formcsv', form_csv)
     sms_handler = MessageHandler(Filters.text, sms)
     csv_handler = MessageHandler(Filters.document, csv_parse)
     purgedbcommence_handler = CallbackQueryHandler(purgedb_commence,
@@ -482,15 +588,6 @@ def main():
                                                      pattern='DROPUSER')
     cancel_handler = CallbackQueryHandler(cancel)
     unknown_handler = MessageHandler(Filters.command, unknown)
-
-#   conv_handler = ConversationHandler(
-#       entry_points=[purgedb_handler, purgeuser_handler],
-#       states={
-#           PURGE_USER: [CallbackQueryHandler(purgeuser_commence)],
-#           PURGE_DB: [CallbackQueryHandler(purgedb_commence)]
-#       },
-#       fallbacks=[CommandHandler('cancel', cancel)]
-#   )
 
     dispatcher.add_handler(start_handler)
     dispatcher.add_handler(userdata_handler)
@@ -501,21 +598,25 @@ def main():
     dispatcher.add_handler(sms_handler)
     dispatcher.add_handler(csv_handler)
     dispatcher.add_handler(wagerequest_handler)
+    dispatcher.add_handler(wageadminrequest_handler)
     dispatcher.add_handler(modifyignore_handler)
+    dispatcher.add_handler(modifynotify_handler)
+    dispatcher.add_handler(formcsv_handler)
     dispatcher.add_handler(purgeusercommence_handler)
     dispatcher.add_handler(purgedbcommence_handler)
     dispatcher.add_handler(cancel_handler)
-#   dispatcher.add_handler(conv_handler)
     dispatcher.add_error_handler(error)
     # Unknown handler should go last!
     dispatcher.add_handler(unknown_handler)
 
+    print("Bot is ready!")
     updater.start_polling()
 
 
 if __name__ == '__main__':
     with sqlite3.connect(db_path, check_same_thread=False) as db:
         cursor = db.cursor()
+    print("Database initialized!")
     datatable_init()
     main()
 else:
@@ -524,3 +625,6 @@ else:
     with sqlite3.connect(db_path, check_same_thread=False) as db:
         cursor = db.cursor()
     datatable_init()
+
+
+# vim:foldmethod=marker

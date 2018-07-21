@@ -30,10 +30,18 @@ __List of commands:__
 
 /modignore add|remove CARD - manages list of ignored cards, records with card numbers in it won't be added through CSV import or text messages
 
+/modnotify add|remove notify - manages list of users to notify when you add an SMS,
+useful if you share a budget
+
 /purgeuser - deletes all transaction records of user
+
+/formcsv - sends CSV with monthly data formed from all available user data
 
 
 __Admin commands:__
+
+/wagedb user MM YYYY - returns the same output as /wage does but for arbitrary user
+present in database, specified by a username
 
 /purgedb - purges an entire database
 
