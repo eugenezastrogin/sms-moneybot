@@ -35,7 +35,7 @@ useful if you share a budget
 
 /purgeuser - deletes all transaction records of user
 
-/formcsv - sends CSV with monthly data formed from all available user data
+/formcsv - sends CSV with all user records
 
 
 __Admin commands:__

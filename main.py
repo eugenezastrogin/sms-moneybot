@@ -132,8 +132,8 @@ def new_transaction(chat_id: int, username: str, sms_data: dict):
     Checks whether this exact transaction is already in the database
     """
     cursor.execute("SELECT COUNT(*) FROM data \
-            WHERE chat_id=:id, name=:name, card=:card,\
-            date_time=:datetime, amount=:amount",
+            WHERE chat_id=:id AND name=:name AND card=:card\
+            AND date_time=:datetime AND amount=:amount",
         {'id': chat_id, 'name': username, 'card': sms_data['card'],
          'datetime': sms_data['datetime'], 'amount': sms_data['amount']})
     return False if cursor.fetchone()[0] > 0 else True
@@ -162,8 +162,8 @@ def insert_notify(chat_id: int, notified: int):
 
 
 def show_ignored_cards(chat_id: int) -> tuple:
-    cursor.execute("SELECT ignore_card FROM ignored_cards WHERE chat_id=:id",
-                   {'id': chat_id})
+    cursor.execute("SELECT ignore_card FROM ignored_cards WHERE chat_id=?",
+                   (chat_id,))
     return sum(cursor.fetchall(), ())
 
 
@@ -174,8 +174,7 @@ def remove_notify(chat_id: int, notified: int):
 
 
 def to_notify(chat_id: int) -> tuple:
-    cursor.execute("SELECT notify FROM notified WHERE chat_id=:id",
-                   {'id': chat_id})
+    cursor.execute("SELECT notify FROM notified WHERE chat_id=?", (chat_id,))
     return sum(cursor.fetchall(), ())
 
 
@@ -191,7 +190,7 @@ def user_data(chat_id: str) -> list:
     """
     Returns user data, list of tuples
     """
-    cursor.execute("SELECT * FROM data WHERE chat_id=:id", {'id': chat_id})
+    cursor.execute("SELECT * FROM data WHERE chat_id=?", (chat_id,))
     return cursor.fetchall()
 
 
@@ -208,8 +207,7 @@ def user_records(chat_id: str) -> list:
     """
     Returns number of relevant user records
     """
-    cursor.execute("SELECT COUNT(*) FROM data WHERE chat_id=:id",
-                   {'id': chat_id})
+    cursor.execute("SELECT COUNT(*) FROM data WHERE chat_id=?", (chat_id,))
     return cursor.fetchone()[0]
 
 
@@ -229,12 +227,11 @@ def purge_all():
 
 def purge_user(user: int):
     with db:
-        cursor.execute("DELETE FROM data WHERE chat_id=:id", {'id': user})
+        cursor.execute("DELETE FROM data WHERE chat_id=?", (user,))
 
 
 def chatid_from_name(user: str) -> int:
-    cursor.execute("SELECT chat_id FROM data WHERE name=:name LIMIT 1",
-                  {'name': user})
+    cursor.execute("SELECT chat_id FROM data WHERE name=? LIMIT 1", (user,))
     try:
         return cursor.fetchone()[0]
     except IndexError:
@@ -242,10 +239,9 @@ def chatid_from_name(user: str) -> int:
 
 
 def name_from_chatid(chatid: int) -> str:
-    cursor.execute("SELECT name FROM data WHERE chat_id=:id LIMIT 1",
-                  {'id': chatid})
+    cursor.execute("SELECT name FROM data WHERE chat_id=? LIMIT 1", (chatid,))
     try:
-        return cursor.fetchone()[0][0]
+        return cursor.fetchone()[0]
     except IndexError:
         return None
 
@@ -485,7 +481,7 @@ def wage_template(bot, update, args, user=0):
             end_date = datetime.datetime(year+1, 1, separator_date)
             wage = wage_calc(user, start_date, end_date)
             bot.send_message(chat_id=update.message.chat_id,
-                         text=f"Wage in that period was {wage:.2f}")
+                             text=f"Wage in that period was {wage:.2f}")
             return None
     else:
         now = datetime.datetime.now()
@@ -671,11 +667,12 @@ def main():
     start_handler = CommandHandler('start', start)
     userdata_handler = CommandHandler('userdata', user_data)
     dumpdb_handler = CommandHandler('dumpdb', dump_db)
+    userinfo_handler = CommandHandler('userinfo', user_info)
     purgedb_handler = CommandHandler('purgedb', purge_db)
     purgeuser_handler = CommandHandler('purgeuser', purgeuser)
     wagerequest_handler = CommandHandler('wage', wage_request, pass_args=True)
     wageadminrequest_handler = CommandHandler('wagedb', wage_admingrequest,
-                                         pass_args=True)
+                                              pass_args=True)
     modifyignore_handler = CommandHandler('modignore', modify_ignore,
                                           pass_args=True)
     modifynotify_handler = CommandHandler('modnotify', modify_notify,
@@ -693,6 +690,7 @@ def main():
     dispatcher.add_handler(start_handler)
     dispatcher.add_handler(userdata_handler)
     dispatcher.add_handler(dumpdb_handler)
+    dispatcher.add_handler(userinfo_handler)
     dispatcher.add_handler(purgedb_handler)
     dispatcher.add_handler(purgeuser_handler)
     dispatcher.add_handler(sms_handler)
