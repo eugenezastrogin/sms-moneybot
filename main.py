@@ -60,7 +60,7 @@ def parse_sms(text: str) -> dict:
     \ +                                    # separator is one space or more
     (\d{2}\.\d{2}\.\d{2}\ \d{2}:\d{2})     # matching date and time
     \D*                       # optional separator is any number of non digits
-    зарплаты
+    (?:зарплаты|отпускных)    # non-capturing alternation group
     \D*                       # optional separator is any number of non digits
     (\d+\.*\d*)                            # matching amount
     ''', re.VERBOSE)
